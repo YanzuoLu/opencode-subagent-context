@@ -21,8 +21,9 @@ function isAssistantMessage(message) {
 }
 
 export function contextTokensForMessage(message) {
-  if (!isAssistantMessage(message)) return 0
-  const tokens = message?.tokens
+  const info = message?.info ?? message
+  if (!isAssistantMessage(info)) return 0
+  const tokens = info?.tokens
   if (!tokens || numberOrZero(tokens.output) <= 0) return 0
   return (
     numberOrZero(tokens.input) +

@@ -113,6 +113,7 @@ function makeTuiApi({ routeSessionID = "root", sessions = [], messages = {} } = 
 test("contextTokensForMessage matches OpenCode Context token formula", () => {
   assert.equal(contextTokensForMessage({ role: "assistant", tokens: tokens(100, 50, 10, 5, 2) }), 167)
   assert.equal(contextTokensForMessage({ type: "assistant", tokens: tokens(20, 3, 2, 1, 4) }), 30)
+  assert.equal(contextTokensForMessage({ info: { role: "assistant", tokens: tokens(7, 3, 2, 1, 1) }, parts: [] }), 14)
   assert.equal(contextTokensForMessage({ role: "user", tokens: tokens(1, 1) }), 0)
   assert.equal(contextTokensForMessage({ role: "assistant", tokens: tokens(100, 0) }), 0)
 })
