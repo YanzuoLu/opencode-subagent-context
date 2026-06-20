@@ -1,7 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 
-import plugin, { collectDescendantIDs, computeSidebarState, contextTokensForMessage, createSidebarElement } from "../tui.js"
+import plugin, { collectDescendantIDs, computeSidebarState, contextTokensForMessage, createSidebarElement, formatTokenCount } from "../tui.js"
 
 function tokens(input, output, reasoning = 0, read = 0, write = 0) {
   return { input, output, reasoning, cache: { read, write } }
@@ -135,6 +135,18 @@ test("contextTokensForMessage matches OpenCode Context token formula", () => {
   assert.equal(contextTokensForMessage({ info: { role: "assistant", tokens: tokens(7, 3, 2, 1, 1) }, parts: [] }), 14)
   assert.equal(contextTokensForMessage({ role: "user", tokens: tokens(1, 1) }), 0)
   assert.equal(contextTokensForMessage({ role: "assistant", tokens: tokens(100, 0) }), 0)
+})
+
+test("formatTokenCount abbreviates long token counts", () => {
+  assert.equal(formatTokenCount(0), "0")
+  assert.equal(formatTokenCount(485), "485")
+  assert.equal(formatTokenCount(999), "999")
+  assert.equal(formatTokenCount(1_000), "1.0K")
+  assert.equal(formatTokenCount(19_515), "19.5K")
+  assert.equal(formatTokenCount(1_234_567), "1.2M")
+  assert.equal(formatTokenCount(1_234_567_890), "1.2B")
+  assert.equal(formatTokenCount(1_234_567_890_123), "1.2T")
+  assert.equal(formatTokenCount(1_234_567_890_123_000), "1,234.6T")
 })
 
 test("collectDescendantIDs returns nested descendants without parents or siblings", () => {
@@ -522,13 +534,13 @@ test("createSidebarElement renders total and subagent contribution", () => {
     props: { width: "100%", flexDirection: "column" },
     children: [
       { type: "text", props: { fg: "text" }, children: ["Usage"] },
-      { type: "text", props: { fg: "muted" }, children: ["128,234 tokens used total"] },
-      { type: "text", props: { fg: "muted" }, children: ["+14,823 used by 3 subagents"] },
+      { type: "text", props: { fg: "muted" }, children: ["128.2K tokens used total"] },
+      { type: "text", props: { fg: "muted" }, children: ["+14.8K used by 3 subagents"] },
       { type: "text", props: { fg: "muted" }, children: ["$0.47 spent total"] },
-      { type: "text", props: { fg: "muted" }, children: ["in 53,770 (+1,000) / $0.27"] },
-      { type: "text", props: { fg: "muted" }, children: ["out 1,817 (+200) / $0.05"] },
-      { type: "text", props: { fg: "muted" }, children: ["rsn 2,295 (+300) / $0.07"] },
-      { type: "text", props: { fg: "muted" }, children: ["cache 146,944 (+13,323) / $0.07"] },
+      { type: "text", props: { fg: "muted" }, children: ["in 53.8K (+1.0K) / $0.27"] },
+      { type: "text", props: { fg: "muted" }, children: ["out 1.8K (+200) / $0.05"] },
+      { type: "text", props: { fg: "muted" }, children: ["rsn 2.3K (+300) / $0.07"] },
+      { type: "text", props: { fg: "muted" }, children: ["cache 146.9K (+13.3K) / $0.07"] },
       { type: "text", props: { fg: "muted" }, children: ["write 0 (+0) / $0.00"] },
     ],
   })
@@ -576,7 +588,7 @@ test("createSidebarElement renders unavailable breakdown costs", () => {
     makeOpenTuiView(),
   )
 
-  assert.equal(rendered.children[5].children[0], "out 1,817 (+0) / unavailable")
+  assert.equal(rendered.children[5].children[0], "out 1.8K (+0) / unavailable")
 })
 
 test("tui registers sidebar_content immediately after built-in Context", async () => {

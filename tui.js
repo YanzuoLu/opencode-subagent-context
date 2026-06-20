@@ -20,6 +20,11 @@ const money = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
 })
+const tokenCountNumber = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+})
+const TOKEN_COUNT_SUFFIXES = ["K", "M", "B", "T"]
 const REFRESH_EVENTS = ["session.created", "session.updated", "session.deleted", "message.updated", "session.next.step.ended"]
 
 function readData(result) {
@@ -32,6 +37,19 @@ function numberOrZero(value) {
 
 function priceOrDefault(value, fallback) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback
+}
+
+export function formatTokenCount(value) {
+  const count = numberOrZero(value)
+  if (count < 1_000) return count.toLocaleString("en-US")
+
+  let scaled = count / 1_000
+  let suffixIndex = 0
+  while (scaled >= 1_000 && suffixIndex < TOKEN_COUNT_SUFFIXES.length - 1) {
+    scaled /= 1_000
+    suffixIndex += 1
+  }
+  return `${tokenCountNumber.format(scaled)}${TOKEN_COUNT_SUFFIXES[suffixIndex]}`
 }
 
 function isAssistantMessage(message) {
@@ -343,9 +361,9 @@ export function createSidebarElement(api, state, view = defaultSolidView) {
     lines.push(textNode("subagent total unavailable", { fg: theme.textMuted }, view))
   } else {
     const subagentCount = state.subagentCount ?? 0
-    lines.push(textNode(`${(state.totalTokens ?? 0).toLocaleString()} tokens used total`, { fg: theme.textMuted }, view))
+    lines.push(textNode(`${formatTokenCount(state.totalTokens ?? 0)} tokens used total`, { fg: theme.textMuted }, view))
     lines.push(
-      textNode(`+${(state.subagentTokens ?? 0).toLocaleString()} used by ${subagentCount} ${pluralSubagent(subagentCount)}`, { fg: theme.textMuted }, view),
+      textNode(`+${formatTokenCount(state.subagentTokens ?? 0)} used by ${subagentCount} ${pluralSubagent(subagentCount)}`, { fg: theme.textMuted }, view),
     )
     lines.push(textNode(state.costAvailable === false ? "API cost unavailable" : `${money.format(state.cost ?? 0)} spent total`, { fg: theme.textMuted }, view))
     const breakdown = state.breakdown ?? emptyBreakdown()
@@ -354,7 +372,7 @@ export function createSidebarElement(api, state, view = defaultSolidView) {
       const cost = part.costAvailable === false ? "unavailable" : money.format(part.cost ?? 0)
       lines.push(
         textNode(
-          `${category.label} ${(part.totalTokens ?? 0).toLocaleString()} (+${(part.subagentTokens ?? 0).toLocaleString()}) / ${cost}`,
+          `${category.label} ${formatTokenCount(part.totalTokens ?? 0)} (+${formatTokenCount(part.subagentTokens ?? 0)}) / ${cost}`,
           { fg: theme.textMuted },
           view,
         ),

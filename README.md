@@ -24,13 +24,13 @@ The plugin renders immediately after the built-in `Context` sidebar block:
 
 ```text
 Usage
-128,234 tokens used total
-+14,823 used by 3 subagents
+128.2K tokens used total
++14.8K used by 3 subagents
 $0.47 spent total
-in 53,770 (+1,000) / $0.27
-out 1,817 (+200) / $0.05
-rsn 2,295 (+300) / $0.07
-cache 146,944 (+13,323) / $0.07
+in 53.8K (+1.0K) / $0.27
+out 1.8K (+200) / $0.05
+rsn 2.3K (+300) / $0.07
+cache 146.9K (+13.3K) / $0.07
 write 0 (+0) / $0.00
 ```
 
@@ -41,6 +41,8 @@ write 0 (+0) / $0.00
 Cost is cumulative estimated API-equivalent spend for the main session plus descendant subagent sessions. It is always calculated from assistant message token usage and the plugin price table; OpenCode's session-level `cost` field is not used.
 
 Breakdown lines show total tokens, subagent tokens in parentheses, and total estimated cost for that token category. `in` is input tokens, `out` is output tokens, `rsn` is reasoning tokens, `cache` is cached input read tokens, and `write` is cache write tokens.
+
+Token counts below 1,000 remain unabridged. Longer counts use one decimal place with `K`, `M`, `B`, or `T` suffixes.
 
 Auto compaction should not make this plugin's token total go down. If OpenCode records compaction or summary generation as assistant messages with token usage, those messages are included in the cumulative total and cumulative spend.
 
