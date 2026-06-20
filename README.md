@@ -33,7 +33,47 @@ $0.02 total
 
 `from N subagents` counts only descendant sessions with non-zero current context tokens.
 
-Cost is the summed session cost for the main session and descendant sessions.
+Cost is estimated API-equivalent cost for the current main session plus descendant subagent contexts. It is always calculated from the latest assistant message token usage and the plugin price table; OpenCode's session-level `cost` field is not used.
+
+If any relevant model has token usage but no configured price, the cost line shows:
+
+```text
+API cost unavailable
+```
+
+Built-in OpenAI prices are per 1M tokens and currently include:
+
+| Model | Input | Cached input | Output |
+| --- | ---: | ---: | ---: |
+| `openai/gpt-5.5` | `$5.00` | `$0.50` | `$30.00` |
+| `openai/gpt-5.5-pro` | `$30.00` | `$30.00` | `$180.00` |
+| `openai/gpt-5.4` | `$2.50` | `$0.25` | `$15.00` |
+| `openai/gpt-5.4-mini` | `$0.75` | `$0.075` | `$4.50` |
+
+Override or add prices in `tui.json` with plugin tuple options:
+
+```json
+{
+  "plugin": [
+    [
+      "opencode-subagent-context@git+https://github.com/YanzuoLu/opencode-subagent-context.git#<full-commit-sha>",
+      {
+        "prices": {
+          "openai/custom-model": {
+            "input": 1.25,
+            "output": 10,
+            "cacheRead": 0.125,
+            "cacheWrite": 1.25,
+            "reasoning": 10
+          }
+        }
+      }
+    ]
+  ]
+}
+```
+
+`reasoning` defaults to the output price. `cacheRead` and `cacheWrite` default to the input price when omitted.
 
 ## Behavior
 

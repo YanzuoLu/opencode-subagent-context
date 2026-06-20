@@ -7,6 +7,10 @@ function tokens(input, output, reasoning = 0, read = 0, write = 0) {
   return { input, output, reasoning, cache: { read, write } }
 }
 
+function assistant(tokens, providerID = "openai", modelID = "gpt-5.5") {
+  return { role: "assistant", providerID, modelID, tokens }
+}
+
 function makeApi({ sessions, messages }) {
   const calls = []
   return {
@@ -153,8 +157,77 @@ test("computeSidebarState sums current main context and descendant contexts", as
     subagentTokens: 40,
     totalTokens: 150,
     subagentCount: 2,
-    cost: 0.06,
+    cost: 0,
+    costAvailable: false,
   })
+})
+
+test("computeSidebarState always estimates cost from OpenAI token prices", async () => {
+  const api = makeApi({
+    sessions: [
+      { id: "root", cost: 999 },
+      { id: "child", parentID: "root", cost: 999 },
+    ],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000))],
+      child: [assistant(tokens(0, 1_000_000))],
+    },
+  })
+
+  assert.deepEqual(await computeSidebarState(api, "root"), {
+    ok: true,
+    mainTokens: 2_000_000,
+    subagentTokens: 1_000_000,
+    totalTokens: 3_000_000,
+    subagentCount: 1,
+    cost: 65,
+    costAvailable: true,
+  })
+})
+
+test("computeSidebarState marks cost unavailable when a priced message has no model price", async () => {
+  const api = makeApi({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000), "unknown", "missing-model")],
+    },
+  })
+
+  assert.deepEqual(await computeSidebarState(api, "root"), {
+    ok: true,
+    mainTokens: 2_000_000,
+    subagentTokens: 0,
+    totalTokens: 2_000_000,
+    subagentCount: 0,
+    cost: 0,
+    costAvailable: false,
+  })
+})
+
+test("computeSidebarState uses configured prices before built-in prices", async () => {
+  const api = makeApi({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000, 0, 1_000_000))],
+    },
+  })
+
+  assert.deepEqual(
+    await computeSidebarState(api, "root", {
+      prices: {
+        "openai/gpt-5.5": { input: 1, output: 2, cacheRead: 0.5 },
+      },
+    }),
+    {
+      ok: true,
+      mainTokens: 3_000_000,
+      subagentTokens: 0,
+      totalTokens: 3_000_000,
+      subagentCount: 0,
+      cost: 3.5,
+      costAvailable: true,
+    },
+  )
 })
 
 test("collectDescendantIDs ignores cycles without returning the root", () => {
@@ -178,7 +251,8 @@ test("computeSidebarState returns zero subagent contribution when there are no d
     subagentTokens: 0,
     totalTokens: 110,
     subagentCount: 0,
-    cost: 0.01,
+    cost: 0,
+    costAvailable: false,
   })
 })
 
@@ -218,7 +292,8 @@ test("computeSidebarState scans paginated session lists before collecting descen
     subagentTokens: 25,
     totalTokens: 135,
     subagentCount: 1,
-    cost: 0.03,
+    cost: 0,
+    costAvailable: false,
   })
   assert.deepEqual(
     api.calls.filter((call) => call.method === "list").map((call) => call.input.start),
@@ -272,7 +347,8 @@ test("computeSidebarState walks session.children when available", async () => {
     subagentTokens: 28,
     totalTokens: 138,
     subagentCount: 2,
-    cost: 0.06,
+    cost: 0,
+    costAvailable: false,
   })
   assert.deepEqual(
     calls.filter((call) => call.method === "children").map((call) => call.input.sessionID),
@@ -289,7 +365,7 @@ test("default export is a target-exclusive TUI plugin module", () => {
 test("createSidebarElement renders total and subagent contribution", () => {
   const rendered = createSidebarElement(
     { theme: { current: { text: "text", textMuted: "muted" } } },
-    { ok: true, totalTokens: 128234, subagentTokens: 14823, subagentCount: 3, cost: 0.02 },
+    { ok: true, totalTokens: 128234, subagentTokens: 14823, subagentCount: 3, cost: 0.02, costAvailable: true },
     makeOpenTuiView(),
   )
 
@@ -314,6 +390,16 @@ test("createSidebarElement renders unavailable state without throwing", () => {
 
   assert.equal(rendered.children[0].children[0], "Context + Subagents")
   assert.equal(rendered.children[1].children[0], "subagent total unavailable")
+})
+
+test("createSidebarElement renders API cost unavailable for missing model prices", () => {
+  const rendered = createSidebarElement(
+    { theme: { current: { text: "text", textMuted: "muted" } } },
+    { ok: true, totalTokens: 128234, subagentTokens: 14823, subagentCount: 3, cost: 0, costAvailable: false },
+    makeOpenTuiView(),
+  )
+
+  assert.equal(rendered.children[3].children[0], "API cost unavailable")
 })
 
 test("tui registers sidebar_content immediately after built-in Context", async () => {
@@ -352,4 +438,28 @@ test("tui refreshes from current route when slot props omit session_id", async (
   assert.equal(rendered.children[1].children[0], "135 tokens total")
   assert.equal(rendered.children[2].children[0], "+25 from 1 subagent")
   assert.equal(api.renders.length > 0, true)
+})
+
+test("tui passes plugin price options to sidebar state calculation", async () => {
+  const api = makeTuiApi({
+    routeSessionID: "root",
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000))],
+    },
+  })
+
+  await plugin.tui(
+    api,
+    { prices: { "openai/gpt-5.5": { input: 1, output: 2 } } },
+    undefined,
+    { view: makeOpenTuiView(), refreshDebounceMs: 0 },
+  )
+  const slot = api.registrations[0].slots.sidebar_content
+
+  slot({}, {})
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  const rendered = slot({}, {})
+
+  assert.equal(rendered.children[3].children[0], "$3.00 total")
 })

@@ -2,6 +2,13 @@ const SERVICE = "opencode-subagent-context"
 const DEFAULT_LIST_LIMIT = 200
 const DEFAULT_MESSAGE_LIMIT = 50
 const REFRESH_DEBOUNCE_MS = 100
+const TOKEN_PRICE_DENOMINATOR = 1_000_000
+const BUILT_IN_PRICES = {
+  "openai/gpt-5.5": { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 5, reasoning: 30 },
+  "openai/gpt-5.5-pro": { input: 30, output: 180, cacheRead: 30, cacheWrite: 30, reasoning: 180 },
+  "openai/gpt-5.4": { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 2.5, reasoning: 15 },
+  "openai/gpt-5.4-mini": { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0.75, reasoning: 4.5 },
+}
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -20,8 +27,12 @@ function isAssistantMessage(message) {
   return message?.role === "assistant" || message?.type === "assistant"
 }
 
+function messageInfo(message) {
+  return message?.info ?? message
+}
+
 export function contextTokensForMessage(message) {
-  const info = message?.info ?? message
+  const info = messageInfo(message)
   if (!isAssistantMessage(info)) return 0
   const tokens = info?.tokens
   if (!tokens || numberOrZero(tokens.output) <= 0) return 0
@@ -32,6 +43,52 @@ export function contextTokensForMessage(message) {
     numberOrZero(tokens.cache?.read) +
     numberOrZero(tokens.cache?.write)
   )
+}
+
+function normalizedPrices(options = {}) {
+  const prices = { ...BUILT_IN_PRICES }
+  for (const [key, value] of Object.entries(options.prices ?? {})) {
+    prices[key.toLowerCase()] = value
+  }
+  return prices
+}
+
+function modelKeyForMessage(message) {
+  const info = messageInfo(message)
+  const providerID = info?.providerID ?? info?.model?.providerID
+  const modelID = info?.modelID ?? info?.model?.id
+  if (!providerID || !modelID) return undefined
+  return `${providerID}/${modelID}`.toLowerCase()
+}
+
+function validPrice(price) {
+  return typeof price?.input === "number" && Number.isFinite(price.input) && typeof price?.output === "number" && Number.isFinite(price.output)
+}
+
+function costForMessage(message, options = {}) {
+  const tokens = messageInfo(message)?.tokens
+  if (contextTokensForMessage(message) <= 0) return { available: true, cost: 0 }
+
+  const key = modelKeyForMessage(message)
+  const price = key ? normalizedPrices(options)[key] : undefined
+  if (!validPrice(price)) return { available: false, cost: 0 }
+
+  const input = price.input
+  const output = price.output
+  const reasoning = typeof price.reasoning === "number" && Number.isFinite(price.reasoning) ? price.reasoning : output
+  const cacheRead = typeof price.cacheRead === "number" && Number.isFinite(price.cacheRead) ? price.cacheRead : input
+  const cacheWrite = typeof price.cacheWrite === "number" && Number.isFinite(price.cacheWrite) ? price.cacheWrite : input
+
+  return {
+    available: true,
+    cost:
+      (numberOrZero(tokens.input) * input +
+        numberOrZero(tokens.output) * output +
+        numberOrZero(tokens.reasoning) * reasoning +
+        numberOrZero(tokens.cache?.read) * cacheRead +
+        numberOrZero(tokens.cache?.write) * cacheWrite) /
+      TOKEN_PRICE_DENOMINATOR,
+  }
 }
 
 export function collectDescendantIDs(sessions, rootID) {
@@ -102,25 +159,10 @@ async function readSessionChildren(api, sessionID) {
   return Array.isArray(children) ? children : []
 }
 
-async function readSession(api, sessionID) {
-  const client = sessionClient(api)
-  if (typeof client?.get !== "function") return undefined
-  const session = readData(
-    await client.get({
-      ...pathOptions(api),
-      sessionID,
-    }),
-  )
-  return session && typeof session === "object" ? session : undefined
-}
-
 async function collectDescendantsFromChildren(api, rootID) {
   const result = []
-  const byID = new Map()
   const seen = new Set([rootID])
   const queue = [rootID]
-  const root = await readSession(api, rootID)
-  if (root) byID.set(root.id ?? rootID, root)
 
   while (queue.length) {
     const parentID = queue.shift()
@@ -129,13 +171,12 @@ async function collectDescendantsFromChildren(api, rootID) {
     for (const child of children) {
       if (!child?.id || seen.has(child.id)) continue
       seen.add(child.id)
-      byID.set(child.id, child)
       result.push(child.id)
       queue.push(child.id)
     }
   }
 
-  return { descendants: result, byID }
+  return result
 }
 
 async function readSessionMessages(api, sessionID, options) {
@@ -149,30 +190,33 @@ async function readSessionMessages(api, sessionID, options) {
   return readData(output) ?? []
 }
 
-async function latestContextTokens(api, sessionID, options) {
+async function latestContextMessage(api, sessionID, options) {
   const messages = await readSessionMessages(api, sessionID, options)
   for (let index = messages.length - 1; index >= 0; index--) {
     const tokens = contextTokensForMessage(messages[index])
-    if (tokens > 0) return tokens
+    if (tokens > 0) return messages[index]
   }
-  return 0
+  return undefined
 }
 
 export async function computeSidebarState(api, sessionID, options = {}) {
   try {
     const childTree = await collectDescendantsFromChildren(api, sessionID)
     const sessions = childTree ? [] : await listSessions(api, options)
-    const descendants = childTree?.descendants ?? collectDescendantIDs(sessions, sessionID)
-    const byID = childTree?.byID ?? new Map(sessions.map((session) => [session.id, session]))
+    const descendants = childTree ?? collectDescendantIDs(sessions, sessionID)
     const allIDs = [sessionID, ...descendants]
     let mainTokens = 0
     let subagentTokens = 0
     let subagentCount = 0
     let cost = 0
+    let costAvailable = true
 
     for (const id of allIDs) {
-      const tokens = await latestContextTokens(api, id, options)
-      cost += numberOrZero(byID.get(id)?.cost)
+      const message = await latestContextMessage(api, id, options)
+      const tokens = contextTokensForMessage(message)
+      const messageCost = costForMessage(message, options)
+      if (!messageCost.available) costAvailable = false
+      cost += messageCost.cost
       if (id === sessionID) {
         mainTokens = tokens
         continue
@@ -188,6 +232,7 @@ export async function computeSidebarState(api, sessionID, options = {}) {
       totalTokens: mainTokens + subagentTokens,
       subagentCount,
       cost,
+      costAvailable,
     }
   } catch (error) {
     return {
@@ -253,7 +298,7 @@ export function createSidebarElement(api, state, view = defaultSolidView) {
     lines.push(
       textNode(`+${(state.subagentTokens ?? 0).toLocaleString()} from ${subagentCount} ${pluralSubagent(subagentCount)}`, { fg: theme.textMuted }, view),
     )
-    lines.push(textNode(`${money.format(state.cost ?? 0)} total`, { fg: theme.textMuted }, view))
+    lines.push(textNode(state.costAvailable === false ? "API cost unavailable" : `${money.format(state.cost ?? 0)} total`, { fg: theme.textMuted }, view))
   }
 
   return elementNode("box", { width: "100%", flexDirection: "column" }, lines, view)
@@ -271,10 +316,11 @@ function requestRender(api) {
   api.renderer?.requestRender?.()
 }
 
-export async function tui(api, _options, _meta, testOptions = {}) {
+export async function tui(api, options = {}, _meta, testOptions = {}) {
   if (typeof api.slots?.register !== "function") return
 
   const view = testOptions.view ?? (await loadSolidView())
+  const computeOptions = { ...options, ...testOptions }
   let fallbackState = testOptions.initialState ?? { ok: false }
   const [state, setState] =
     typeof view.createSignal === "function"
@@ -295,7 +341,7 @@ export async function tui(api, _options, _meta, testOptions = {}) {
     if (disposed || inFlight || !sessionID) return
     inFlight = true
     try {
-      setState({ ...(await computeSidebarState(api, sessionID, testOptions)), sessionID })
+      setState({ ...(await computeSidebarState(api, sessionID, computeOptions)), sessionID })
       requestRender(api)
     } finally {
       inFlight = false
