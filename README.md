@@ -1,6 +1,6 @@
 # opencode-subagent-context
 
-Show OpenCode main-agent usage plus subagent usage in the TUI sidebar.
+Show OpenCode main-agent usage plus subagent usage and cost breakdown in the TUI sidebar.
 
 ## Usage
 
@@ -23,10 +23,15 @@ No manual `npm install` step is required. OpenCode installs the GitHub plugin sp
 The plugin renders immediately after the built-in `Context` sidebar block:
 
 ```text
-Usage + Subagents
+Usage
 128,234 tokens used total
 +14,823 used by 3 subagents
-$0.02 spent total
+$0.47 spent total
+in 53,770 (+1,000) / $0.27
+out 1,817 (+200) / $0.05
+rsn 2,295 (+300) / $0.07
+cache 146,944 (+13,323) / $0.07
+write 0 (+0) / $0.00
 ```
 
 `tokens used total` is cumulative token usage for the main session plus all descendant subagent sessions. It sums every assistant message with non-zero output tokens returned by OpenCode's session API. Each message uses the same token formula as OpenCode's built-in Context block: input + output + reasoning + cache read + cache write.
@@ -35,6 +40,8 @@ $0.02 spent total
 
 Cost is cumulative estimated API-equivalent spend for the main session plus descendant subagent sessions. It is always calculated from assistant message token usage and the plugin price table; OpenCode's session-level `cost` field is not used.
 
+Breakdown lines show total tokens, subagent tokens in parentheses, and total estimated cost for that token category. `in` is input tokens, `out` is output tokens, `rsn` is reasoning tokens, `cache` is cached input read tokens, and `write` is cache write tokens.
+
 Auto compaction should not make this plugin's token total go down. If OpenCode records compaction or summary generation as assistant messages with token usage, those messages are included in the cumulative total and cumulative spend.
 
 If any relevant model has token usage but no configured price, the cost line shows:
@@ -42,6 +49,8 @@ If any relevant model has token usage but no configured price, the cost line sho
 ```text
 API cost unavailable
 ```
+
+If only a breakdown category cost is unavailable, that category keeps its token counts and shows `unavailable` as the category cost.
 
 Built-in OpenAI prices are per 1M tokens and currently include:
 
@@ -86,7 +95,7 @@ It reads session parent links through OpenCode's session API and renders a separ
 If session reads fail, the sidebar shows:
 
 ```text
-Usage + Subagents
+Usage
 subagent total unavailable
 ```
 
@@ -101,7 +110,7 @@ The intended smoke test is:
 1. Install the pinned commit in `tui.json`.
 2. Restart OpenCode.
 3. Resume a tmux/OpenCode session with subagents, or ask the main agent to launch a subagent.
-4. Confirm the sidebar shows `Usage + Subagents` and a non-zero `used by N subagents` line.
+4. Confirm the sidebar shows `Usage`, the preserved total/subagent/spend lines, and the `in`, `out`, `rsn`, `cache`, and `write` breakdown lines.
 
 ## Development
 

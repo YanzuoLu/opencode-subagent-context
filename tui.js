@@ -9,6 +9,13 @@ const BUILT_IN_PRICES = {
   "openai/gpt-5.4": { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 2.5, reasoning: 15 },
   "openai/gpt-5.4-mini": { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0.75, reasoning: 4.5 },
 }
+const BREAKDOWN_CATEGORIES = [
+  { key: "input", label: "in", tokens: (tokens) => numberOrZero(tokens?.input), price: (price) => price.input },
+  { key: "output", label: "out", tokens: (tokens) => numberOrZero(tokens?.output), price: (price) => price.output },
+  { key: "reasoning", label: "rsn", tokens: (tokens) => numberOrZero(tokens?.reasoning), price: (price) => priceOrDefault(price.reasoning, price.output) },
+  { key: "cacheRead", label: "cache", tokens: (tokens) => numberOrZero(tokens?.cache?.read), price: (price) => priceOrDefault(price.cacheRead, price.input) },
+  { key: "cacheWrite", label: "write", tokens: (tokens) => numberOrZero(tokens?.cache?.write), price: (price) => priceOrDefault(price.cacheWrite, price.input) },
+]
 const money = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -21,6 +28,10 @@ function readData(result) {
 
 function numberOrZero(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0
+}
+
+function priceOrDefault(value, fallback) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback
 }
 
 function isAssistantMessage(message) {
@@ -65,29 +76,55 @@ function validPrice(price) {
   return typeof price?.input === "number" && Number.isFinite(price.input) && typeof price?.output === "number" && Number.isFinite(price.output)
 }
 
+function emptyBreakdown() {
+  const breakdown = {}
+  for (const category of BREAKDOWN_CATEGORIES) {
+    breakdown[category.key] = { totalTokens: 0, subagentTokens: 0, cost: 0, costAvailable: true }
+  }
+  return breakdown
+}
+
+function mergeBreakdown(target, source, isSubagent = false) {
+  for (const category of BREAKDOWN_CATEGORIES) {
+    const targetPart = target[category.key]
+    const sourcePart = source?.[category.key]
+    const tokens = sourcePart?.totalTokens ?? 0
+    targetPart.totalTokens += tokens
+    if (isSubagent) targetPart.subagentTokens += tokens
+    targetPart.cost += sourcePart?.cost ?? 0
+    if (sourcePart?.costAvailable === false) targetPart.costAvailable = false
+  }
+}
+
 function costForMessage(message, options = {}) {
   const tokens = messageInfo(message)?.tokens
-  if (contextTokensForMessage(message) <= 0) return { available: true, cost: 0 }
+  const breakdown = emptyBreakdown()
+  if (contextTokensForMessage(message) <= 0) return { available: true, cost: 0, breakdown }
 
   const key = modelKeyForMessage(message)
   const price = key ? normalizedPrices(options)[key] : undefined
-  if (!validPrice(price)) return { available: false, cost: 0 }
+  if (!validPrice(price)) {
+    for (const category of BREAKDOWN_CATEGORIES) {
+      const count = category.tokens(tokens)
+      breakdown[category.key].totalTokens = count
+      if (count > 0) breakdown[category.key].costAvailable = false
+    }
+    return { available: false, cost: 0, breakdown }
+  }
 
-  const input = price.input
-  const output = price.output
-  const reasoning = typeof price.reasoning === "number" && Number.isFinite(price.reasoning) ? price.reasoning : output
-  const cacheRead = typeof price.cacheRead === "number" && Number.isFinite(price.cacheRead) ? price.cacheRead : input
-  const cacheWrite = typeof price.cacheWrite === "number" && Number.isFinite(price.cacheWrite) ? price.cacheWrite : input
+  let cost = 0
+  for (const category of BREAKDOWN_CATEGORIES) {
+    const count = category.tokens(tokens)
+    const categoryCost = (count * category.price(price)) / TOKEN_PRICE_DENOMINATOR
+    breakdown[category.key].totalTokens = count
+    breakdown[category.key].cost = categoryCost
+    cost += categoryCost
+  }
 
   return {
     available: true,
-    cost:
-      (numberOrZero(tokens.input) * input +
-        numberOrZero(tokens.output) * output +
-        numberOrZero(tokens.reasoning) * reasoning +
-        numberOrZero(tokens.cache?.read) * cacheRead +
-        numberOrZero(tokens.cache?.write) * cacheWrite) /
-      TOKEN_PRICE_DENOMINATOR,
+    cost,
+    breakdown,
   }
 }
 
@@ -196,15 +233,17 @@ async function cumulativeUsageForSession(api, sessionID, options) {
   let tokens = 0
   let cost = 0
   let costAvailable = true
+  const breakdown = emptyBreakdown()
   for (let index = messages.length - 1; index >= 0; index--) {
     const messageTokens = contextTokensForMessage(messages[index])
     if (messageTokens <= 0) continue
     const messageCost = costForMessage(messages[index], options)
     tokens += messageTokens
     cost += messageCost.cost
+    mergeBreakdown(breakdown, messageCost.breakdown)
     if (!messageCost.available) costAvailable = false
   }
-  return { tokens, cost, costAvailable }
+  return { tokens, cost, costAvailable, breakdown }
 }
 
 export async function computeSidebarState(api, sessionID, options = {}) {
@@ -218,6 +257,7 @@ export async function computeSidebarState(api, sessionID, options = {}) {
     let subagentCount = 0
     let cost = 0
     let costAvailable = true
+    const breakdown = emptyBreakdown()
 
     for (const id of allIDs) {
       const usage = await cumulativeUsageForSession(api, id, options)
@@ -225,9 +265,11 @@ export async function computeSidebarState(api, sessionID, options = {}) {
       cost += usage.cost
       if (id === sessionID) {
         mainTokens = usage.tokens
+        mergeBreakdown(breakdown, usage.breakdown)
         continue
       }
       subagentTokens += usage.tokens
+      mergeBreakdown(breakdown, usage.breakdown, true)
       if (usage.tokens > 0) subagentCount += 1
     }
 
@@ -239,6 +281,7 @@ export async function computeSidebarState(api, sessionID, options = {}) {
       subagentCount,
       cost,
       costAvailable,
+      breakdown,
     }
   } catch (error) {
     return {
@@ -294,7 +337,7 @@ function pluralSubagent(count) {
 export function createSidebarElement(api, state, view = defaultSolidView) {
   if (!view) throw new Error(`${SERVICE}: TUI runtime is not initialized`)
   const theme = themeFor(api)
-  const lines = [textNode("Usage + Subagents", { fg: theme.text }, view)]
+  const lines = [textNode("Usage", { fg: theme.text }, view)]
 
   if (!state?.ok) {
     lines.push(textNode("subagent total unavailable", { fg: theme.textMuted }, view))
@@ -305,6 +348,18 @@ export function createSidebarElement(api, state, view = defaultSolidView) {
       textNode(`+${(state.subagentTokens ?? 0).toLocaleString()} used by ${subagentCount} ${pluralSubagent(subagentCount)}`, { fg: theme.textMuted }, view),
     )
     lines.push(textNode(state.costAvailable === false ? "API cost unavailable" : `${money.format(state.cost ?? 0)} spent total`, { fg: theme.textMuted }, view))
+    const breakdown = state.breakdown ?? emptyBreakdown()
+    for (const category of BREAKDOWN_CATEGORIES) {
+      const part = breakdown[category.key] ?? { totalTokens: 0, subagentTokens: 0, cost: 0, costAvailable: true }
+      const cost = part.costAvailable === false ? "unavailable" : money.format(part.cost ?? 0)
+      lines.push(
+        textNode(
+          `${category.label} ${(part.totalTokens ?? 0).toLocaleString()} (+${(part.subagentTokens ?? 0).toLocaleString()}) / ${cost}`,
+          { fg: theme.textMuted },
+          view,
+        ),
+      )
+    }
   }
 
   return elementNode("box", { width: "100%", flexDirection: "column" }, lines, view)
