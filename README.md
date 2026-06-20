@@ -1,6 +1,6 @@
 # opencode-subagent-context
 
-Show OpenCode main-agent context plus subagent context in the TUI sidebar.
+Show OpenCode main-agent usage plus subagent usage in the TUI sidebar.
 
 ## Usage
 
@@ -23,17 +23,19 @@ No manual `npm install` step is required. OpenCode installs the GitHub plugin sp
 The plugin renders immediately after the built-in `Context` sidebar block:
 
 ```text
-Context + Subagents
-128,234 tokens total
-+14,823 from 3 subagents
-$0.02 total
+Usage + Subagents
+128,234 tokens used total
++14,823 used by 3 subagents
+$0.02 spent total
 ```
 
-`tokens total` is the current main session context tokens plus current context tokens from all descendant subagent sessions. The token formula matches OpenCode's built-in Context block: input + output + reasoning + cache read + cache write from each session's latest assistant message.
+`tokens used total` is cumulative token usage for the main session plus all descendant subagent sessions. It sums every assistant message with non-zero output tokens returned by OpenCode's session API. Each message uses the same token formula as OpenCode's built-in Context block: input + output + reasoning + cache read + cache write.
 
-`from N subagents` counts only descendant sessions with non-zero current context tokens.
+`used by N subagents` counts only descendant sessions with non-zero cumulative usage.
 
-Cost is estimated API-equivalent cost for the current main session plus descendant subagent contexts. It is always calculated from the latest assistant message token usage and the plugin price table; OpenCode's session-level `cost` field is not used.
+Cost is cumulative estimated API-equivalent spend for the main session plus descendant subagent sessions. It is always calculated from assistant message token usage and the plugin price table; OpenCode's session-level `cost` field is not used.
+
+Auto compaction should not make this plugin's token total go down. If OpenCode records compaction or summary generation as assistant messages with token usage, those messages are included in the cumulative total and cumulative spend.
 
 If any relevant model has token usage but no configured price, the cost line shows:
 
@@ -84,7 +86,7 @@ It reads session parent links through OpenCode's session API and renders a separ
 If session reads fail, the sidebar shows:
 
 ```text
-Context + Subagents
+Usage + Subagents
 subagent total unavailable
 ```
 
@@ -99,7 +101,7 @@ The intended smoke test is:
 1. Install the pinned commit in `tui.json`.
 2. Restart OpenCode.
 3. Resume a tmux/OpenCode session with subagents, or ask the main agent to launch a subagent.
-4. Confirm the sidebar shows `Context + Subagents` and a non-zero `from N subagents` line.
+4. Confirm the sidebar shows `Usage + Subagents` and a non-zero `used by N subagents` line.
 
 ## Development
 

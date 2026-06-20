@@ -182,21 +182,29 @@ async function collectDescendantsFromChildren(api, rootID) {
 async function readSessionMessages(api, sessionID, options) {
   const client = sessionClient(api)
   if (typeof client?.messages !== "function") throw new Error(`${SERVICE}: session.messages is unavailable`)
-  const output = await client.messages({
+  const input = {
     ...pathOptions(api),
     sessionID,
-    limit: options.messageLimit ?? DEFAULT_MESSAGE_LIMIT,
-  })
+  }
+  if (options.messageLimit !== undefined) input.limit = options.messageLimit
+  const output = await client.messages(input)
   return readData(output) ?? []
 }
 
-async function latestContextMessage(api, sessionID, options) {
+async function cumulativeUsageForSession(api, sessionID, options) {
   const messages = await readSessionMessages(api, sessionID, options)
+  let tokens = 0
+  let cost = 0
+  let costAvailable = true
   for (let index = messages.length - 1; index >= 0; index--) {
-    const tokens = contextTokensForMessage(messages[index])
-    if (tokens > 0) return messages[index]
+    const messageTokens = contextTokensForMessage(messages[index])
+    if (messageTokens <= 0) continue
+    const messageCost = costForMessage(messages[index], options)
+    tokens += messageTokens
+    cost += messageCost.cost
+    if (!messageCost.available) costAvailable = false
   }
-  return undefined
+  return { tokens, cost, costAvailable }
 }
 
 export async function computeSidebarState(api, sessionID, options = {}) {
@@ -212,17 +220,15 @@ export async function computeSidebarState(api, sessionID, options = {}) {
     let costAvailable = true
 
     for (const id of allIDs) {
-      const message = await latestContextMessage(api, id, options)
-      const tokens = contextTokensForMessage(message)
-      const messageCost = costForMessage(message, options)
-      if (!messageCost.available) costAvailable = false
-      cost += messageCost.cost
+      const usage = await cumulativeUsageForSession(api, id, options)
+      if (!usage.costAvailable) costAvailable = false
+      cost += usage.cost
       if (id === sessionID) {
-        mainTokens = tokens
+        mainTokens = usage.tokens
         continue
       }
-      subagentTokens += tokens
-      if (tokens > 0) subagentCount += 1
+      subagentTokens += usage.tokens
+      if (usage.tokens > 0) subagentCount += 1
     }
 
     return {
@@ -288,17 +294,17 @@ function pluralSubagent(count) {
 export function createSidebarElement(api, state, view = defaultSolidView) {
   if (!view) throw new Error(`${SERVICE}: TUI runtime is not initialized`)
   const theme = themeFor(api)
-  const lines = [textNode("Context + Subagents", { fg: theme.text }, view)]
+  const lines = [textNode("Usage + Subagents", { fg: theme.text }, view)]
 
   if (!state?.ok) {
     lines.push(textNode("subagent total unavailable", { fg: theme.textMuted }, view))
   } else {
     const subagentCount = state.subagentCount ?? 0
-    lines.push(textNode(`${(state.totalTokens ?? 0).toLocaleString()} tokens total`, { fg: theme.textMuted }, view))
+    lines.push(textNode(`${(state.totalTokens ?? 0).toLocaleString()} tokens used total`, { fg: theme.textMuted }, view))
     lines.push(
-      textNode(`+${(state.subagentTokens ?? 0).toLocaleString()} from ${subagentCount} ${pluralSubagent(subagentCount)}`, { fg: theme.textMuted }, view),
+      textNode(`+${(state.subagentTokens ?? 0).toLocaleString()} used by ${subagentCount} ${pluralSubagent(subagentCount)}`, { fg: theme.textMuted }, view),
     )
-    lines.push(textNode(state.costAvailable === false ? "API cost unavailable" : `${money.format(state.cost ?? 0)} total`, { fg: theme.textMuted }, view))
+    lines.push(textNode(state.costAvailable === false ? "API cost unavailable" : `${money.format(state.cost ?? 0)} spent total`, { fg: theme.textMuted }, view))
   }
 
   return elementNode("box", { width: "100%", flexDirection: "column" }, lines, view)
