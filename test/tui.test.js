@@ -225,6 +225,60 @@ test("computeSidebarState scans paginated session lists before collecting descen
   )
 })
 
+test("computeSidebarState walks session.children when available", async () => {
+  const calls = []
+  const api = {
+    calls,
+    state: { path: { directory: "/tmp/workspace", workspace: "workspace-a" } },
+    client: {
+      session: {
+        async list() {
+          throw new Error("session.list should not be called")
+        },
+        async get(input) {
+          calls.push({ method: "get", input })
+          return { data: { id: input.sessionID, cost: 0.01 } }
+        },
+        async children(input) {
+          calls.push({ method: "children", input })
+          return {
+            data:
+              {
+                root: [{ id: "child", cost: 0.02 }],
+                child: [{ id: "grandchild", cost: 0.03 }],
+                grandchild: [],
+              }[input.sessionID] ?? [],
+          }
+        },
+        async messages(input) {
+          calls.push({ method: "messages", input })
+          return {
+            data:
+              {
+                root: [{ role: "assistant", tokens: tokens(100, 10) }],
+                child: [{ role: "assistant", tokens: tokens(20, 5) }],
+                grandchild: [{ role: "assistant", tokens: tokens(1, 2) }],
+              }[input.sessionID] ?? [],
+          }
+        },
+      },
+    },
+  }
+
+  assert.deepEqual(await computeSidebarState(api, "root"), {
+    ok: true,
+    mainTokens: 110,
+    subagentTokens: 28,
+    totalTokens: 138,
+    subagentCount: 2,
+    cost: 0.06,
+  })
+  assert.deepEqual(
+    calls.filter((call) => call.method === "children").map((call) => call.input.sessionID),
+    ["root", "child", "grandchild"],
+  )
+})
+
 test("default export is a target-exclusive TUI plugin module", () => {
   assert.equal(plugin.id, "opencode-subagent-context")
   assert.equal(typeof plugin.tui, "function")

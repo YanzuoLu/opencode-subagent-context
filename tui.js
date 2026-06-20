@@ -90,6 +90,53 @@ async function listSessions(api, options) {
   }
 }
 
+async function readSessionChildren(api, sessionID) {
+  const client = sessionClient(api)
+  if (typeof client?.children !== "function") return undefined
+  const output = await client.children({
+    ...pathOptions(api),
+    sessionID,
+  })
+  const children = readData(output)
+  return Array.isArray(children) ? children : []
+}
+
+async function readSession(api, sessionID) {
+  const client = sessionClient(api)
+  if (typeof client?.get !== "function") return undefined
+  const session = readData(
+    await client.get({
+      ...pathOptions(api),
+      sessionID,
+    }),
+  )
+  return session && typeof session === "object" ? session : undefined
+}
+
+async function collectDescendantsFromChildren(api, rootID) {
+  const result = []
+  const byID = new Map()
+  const seen = new Set([rootID])
+  const queue = [rootID]
+  const root = await readSession(api, rootID)
+  if (root) byID.set(root.id ?? rootID, root)
+
+  while (queue.length) {
+    const parentID = queue.shift()
+    const children = await readSessionChildren(api, parentID)
+    if (!children) return undefined
+    for (const child of children) {
+      if (!child?.id || seen.has(child.id)) continue
+      seen.add(child.id)
+      byID.set(child.id, child)
+      result.push(child.id)
+      queue.push(child.id)
+    }
+  }
+
+  return { descendants: result, byID }
+}
+
 async function readSessionMessages(api, sessionID, options) {
   const client = sessionClient(api)
   if (typeof client?.messages !== "function") throw new Error(`${SERVICE}: session.messages is unavailable`)
@@ -112,9 +159,10 @@ async function latestContextTokens(api, sessionID, options) {
 
 export async function computeSidebarState(api, sessionID, options = {}) {
   try {
-    const sessions = await listSessions(api, options)
-    const descendants = collectDescendantIDs(sessions, sessionID)
-    const byID = new Map(sessions.map((session) => [session.id, session]))
+    const childTree = await collectDescendantsFromChildren(api, sessionID)
+    const sessions = childTree ? [] : await listSessions(api, options)
+    const descendants = childTree?.descendants ?? collectDescendantIDs(sessions, sessionID)
+    const byID = childTree?.byID ?? new Map(sessions.map((session) => [session.id, session]))
     const allIDs = [sessionID, ...descendants]
     let mainTokens = 0
     let subagentTokens = 0
