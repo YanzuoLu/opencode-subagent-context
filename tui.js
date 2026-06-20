@@ -214,6 +214,10 @@ function currentSessionID(api) {
   return api.route?.current?.params?.sessionID
 }
 
+function slotSessionID(api, props = {}) {
+  return props.session_id ?? props.sessionID ?? currentSessionID(api)
+}
+
 function requestRender(api) {
   api.renderer?.requestRender?.()
 }
@@ -236,6 +240,7 @@ export async function tui(api, _options, _meta, testOptions = {}) {
   let inFlight = false
   let activeSessionID = currentSessionID(api)
   let refreshTimer
+  let scheduledSessionID
 
   async function refresh(sessionID) {
     if (disposed || inFlight || !sessionID) return
@@ -251,15 +256,21 @@ export async function tui(api, _options, _meta, testOptions = {}) {
   function scheduleRefresh(sessionID = activeSessionID) {
     if (disposed || !sessionID) return
     activeSessionID = sessionID
+    if (scheduledSessionID === sessionID && refreshTimer) return
+    scheduledSessionID = sessionID
     clearTimeout(refreshTimer)
-    refreshTimer = setTimeout(() => refresh(sessionID), testOptions.refreshDebounceMs ?? REFRESH_DEBOUNCE_MS)
+    refreshTimer = setTimeout(() => {
+      scheduledSessionID = undefined
+      refresh(sessionID)
+    }, testOptions.refreshDebounceMs ?? REFRESH_DEBOUNCE_MS)
   }
 
   api.slots.register({
     order: 101,
     slots: {
       sidebar_content(_ctx, props = {}) {
-        if (props.session_id && state().sessionID !== props.session_id) scheduleRefresh(props.session_id)
+        const sessionID = slotSessionID(api, props)
+        if (sessionID && state().sessionID !== sessionID) scheduleRefresh(sessionID)
         return createSidebarElement(api, state(), view)
       },
     },

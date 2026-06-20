@@ -67,12 +67,13 @@ function makeOpenTuiView() {
   }
 }
 
-function makeTuiApi() {
+function makeTuiApi({ routeSessionID = "root", sessions = [], messages = {} } = {}) {
   const registrations = []
   const renders = []
   return {
     registrations,
     renders,
+    route: { current: { name: "session", params: { sessionID: routeSessionID } } },
     state: { path: { directory: "/tmp/workspace", workspace: "workspace-a" } },
     theme: { current: { text: "text", textMuted: "muted" } },
     renderer: {
@@ -99,10 +100,10 @@ function makeTuiApi() {
     client: {
       session: {
         async list() {
-          return []
+          return sessions
         },
-        async messages() {
-          return { data: [] }
+        async messages(input) {
+          return { data: messages[input.sessionID] ?? [] }
         },
       },
     },
@@ -271,4 +272,29 @@ test("tui registers sidebar_content immediately after built-in Context", async (
 
   const rendered = api.registrations[0].slots.sidebar_content({}, { session_id: "root" })
   assert.equal(rendered.children[0].children[0], "Context + Subagents")
+})
+
+test("tui refreshes from current route when slot props omit session_id", async () => {
+  const api = makeTuiApi({
+    routeSessionID: "root",
+    sessions: [
+      { id: "root", cost: 0.01 },
+      { id: "child", parentID: "root", cost: 0.02 },
+    ],
+    messages: {
+      root: [{ role: "assistant", tokens: tokens(100, 10) }],
+      child: [{ role: "assistant", tokens: tokens(20, 5) }],
+    },
+  })
+
+  await plugin.tui(api, undefined, undefined, { view: makeOpenTuiView(), refreshDebounceMs: 0 })
+  const slot = api.registrations[0].slots.sidebar_content
+
+  slot({}, {})
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  const rendered = slot({}, {})
+
+  assert.equal(rendered.children[1].children[0], "135 tokens total")
+  assert.equal(rendered.children[2].children[0], "+25 from 1 subagent")
+  assert.equal(api.renders.length > 0, true)
 })
