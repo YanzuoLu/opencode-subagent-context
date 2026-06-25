@@ -48,6 +48,28 @@ function makeApi({ sessions, messages }) {
   }
 }
 
+function catalogModel(id, providerID, input, output, read = 0, write = 0) {
+  return {
+    id,
+    providerID,
+    cost: [{ input, output, cache: { read, write } }],
+  }
+}
+
+function makeApiWithModels({ sessions, messages, models, modelError }) {
+  const api = makeApi({ sessions, messages })
+  api.client.v2 = {
+    model: {
+      async list(input = {}) {
+        api.calls.push({ method: "model.list", input })
+        if (modelError) throw modelError
+        return { data: models }
+      },
+    },
+  }
+  return api
+}
+
 function makePaginatedApi({ sessions, messages }) {
   const calls = []
   return {
@@ -335,6 +357,98 @@ test("computeSidebarState treats zero configured category prices as valid", asyn
       }),
     },
   )
+})
+
+test("computeSidebarState uses OpenCode catalog prices by exact provider and model", async () => {
+  const api = makeApiWithModels({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000), "custom", "catalog-model")],
+    },
+    models: [catalogModel("catalog-model", "custom", 1, 2, 0.25, 0.5)],
+  })
+
+  assert.deepEqual(await computeSidebarState(api, "root"), {
+    ok: true,
+    mainTokens: 2_000_000,
+    subagentTokens: 0,
+    totalTokens: 2_000_000,
+    subagentCount: 0,
+    cost: 3,
+    costAvailable: true,
+    breakdown: expectedBreakdown({
+      input: usagePart(1_000_000, 0, 1),
+      output: usagePart(1_000_000, 0, 2),
+    }),
+  })
+})
+
+test("computeSidebarState falls back to exact modelID across catalog providers", async () => {
+  const api = makeApiWithModels({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000), "missing-provider", "shared-model")],
+    },
+    models: [catalogModel("shared-model", "catalog-provider", 3, 4)],
+  })
+
+  const state = await computeSidebarState(api, "root")
+  assert.equal(state.costAvailable, true)
+  assert.equal(state.cost, 7)
+  assert.equal(state.breakdown.input.cost, 3)
+  assert.equal(state.breakdown.output.cost, 4)
+})
+
+test("computeSidebarState chooses highest exact modelID candidate cost", async () => {
+  const api = makeApiWithModels({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 2_000_000, 0, 1_000_000), "missing-provider", "shared-model")],
+    },
+    models: [
+      catalogModel("shared-model", "cheap", 1, 20, 0.5),
+      catalogModel("shared-model", "expensive", 10, 15, 10),
+    ],
+  })
+
+  const state = await computeSidebarState(api, "root")
+  assert.equal(state.costAvailable, true)
+  assert.equal(state.cost, 50)
+  assert.equal(state.breakdown.input.cost, 10)
+  assert.equal(state.breakdown.output.cost, 30)
+  assert.equal(state.breakdown.cacheRead.cost, 10)
+})
+
+test("computeSidebarState keeps non-exact modelID prices unavailable", async () => {
+  const api = makeApiWithModels({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000), "missing-provider", "shared-model-v2")],
+    },
+    models: [catalogModel("shared-model", "catalog-provider", 3, 4)],
+  })
+
+  const state = await computeSidebarState(api, "root")
+  assert.equal(state.costAvailable, false)
+  assert.equal(state.cost, 0)
+})
+
+test("computeSidebarState falls back to configured and built-in prices when catalog fails", async () => {
+  const api = makeApiWithModels({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000))],
+    },
+    models: [],
+    modelError: new Error("catalog unavailable"),
+  })
+
+  const state = await computeSidebarState(api, "root", {
+    prices: { "openai/gpt-5.5": { input: 1, output: 2 } },
+  })
+  assert.equal(state.ok, true)
+  assert.equal(state.costAvailable, true)
+  assert.equal(state.cost, 3)
 })
 
 test("computeSidebarState reports per-category total and subagent usage with costs", async () => {

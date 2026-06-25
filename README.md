@@ -9,12 +9,12 @@ OpenCode 1.17.8 loads TUI plugins from `tui.json`. Add this one-line plugin entr
 ```json
 {
   "plugin": [
-    "opencode-subagent-context@git+https://github.com/YanzuoLu/opencode-subagent-context.git#<full-commit-sha>"
+    "opencode-subagent-context@git+https://github.com/YanzuoLu/opencode-subagent-context.git#v0.1.8"
   ]
 }
 ```
 
-Use a full commit SHA. Do not leave this plugin on a floating branch spec; OpenCode caches plugin installs.
+Use a tagged release like `v0.1.8`. Do not leave this plugin on a floating branch spec; OpenCode caches plugin installs.
 
 No manual `npm install` step is required. OpenCode installs the GitHub plugin spec at startup.
 
@@ -38,7 +38,7 @@ write 0 (+0) / $0.00
 
 `used by N subagents` counts only descendant sessions with non-zero cumulative usage.
 
-Cost is cumulative estimated API-equivalent spend for the main session plus descendant subagent sessions. It is always calculated from assistant message token usage and the plugin price table; OpenCode's session-level `cost` field is not used.
+Cost is cumulative estimated API-equivalent spend for the main session plus descendant subagent sessions. It is calculated from assistant message token usage and the loaded price table; OpenCode's session-level `cost` field is not used.
 
 Breakdown lines show total tokens, subagent tokens in parentheses, and total estimated cost for that token category. `in` is input tokens, `out` is output tokens, `rsn` is reasoning tokens, `cache` is cached input read tokens, and `write` is cache write tokens.
 
@@ -46,7 +46,11 @@ Token counts below 1,000 remain unabridged. Longer counts use one decimal place 
 
 Auto compaction should not make this plugin's token total go down. If OpenCode records compaction or summary generation as assistant messages with token usage, those messages are included in the cumulative total and cumulative spend.
 
-If any relevant model has token usage but no configured price, the cost line shows:
+The plugin first tries OpenCode model catalog prices, then its built-in OpenAI fallback prices. User-configured `prices` in `tui.json` override both.
+
+Price matching first uses exact `providerID/modelID`. If that is unavailable, the plugin tries an exact `modelID` match across the loaded price table and uses the highest calculated cost when multiple providers expose the same model ID. It does not fuzzy-match model names.
+
+If any relevant model has token usage but no exact price match, the cost line shows:
 
 ```text
 API cost unavailable
@@ -54,7 +58,7 @@ API cost unavailable
 
 If only a breakdown category cost is unavailable, that category keeps its token counts and shows `unavailable` as the category cost.
 
-Built-in OpenAI prices are per 1M tokens and currently include:
+Built-in OpenAI fallback prices are per 1M tokens and currently include:
 
 | Model | Input | Cached input | Output |
 | --- | ---: | ---: | ---: |

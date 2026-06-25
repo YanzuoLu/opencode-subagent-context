@@ -82,6 +82,67 @@ function normalizedPrices(options = {}) {
   return prices
 }
 
+function addPrice(indexes, key, price) {
+  const normalizedKey = typeof key === "string" ? key.toLowerCase() : undefined
+  if (!normalizedKey || !validPrice(price)) return
+
+  indexes.byProviderModel[normalizedKey] = price
+
+  const slashIndex = normalizedKey.indexOf("/")
+  if (slashIndex < 0) return
+
+  const modelID = normalizedKey.slice(slashIndex + 1)
+  if (!modelID) return
+
+  const list = indexes.byModel[modelID] ?? []
+  list.push(price)
+  indexes.byModel[modelID] = list
+}
+
+function priceFromCatalogModel(model) {
+  const cost = Array.isArray(model?.cost) ? model.cost[0] : model?.cost
+  if (!cost) return undefined
+
+  return {
+    input: cost.input,
+    output: cost.output,
+    cacheRead: cost.cache?.read,
+    cacheWrite: cost.cache?.write,
+    reasoning: cost.output,
+  }
+}
+
+async function catalogPrices(api) {
+  const list = api.client?.v2?.model?.list
+  if (typeof list !== "function") return {}
+
+  try {
+    const output = await list({ location: pathOptions(api) })
+    const models = readData(output)
+    if (!Array.isArray(models)) return {}
+
+    const prices = {}
+    for (const model of models) {
+      const providerID = model?.providerID
+      const modelID = model?.id
+      const price = priceFromCatalogModel(model)
+      if (!providerID || !modelID || !validPrice(price)) continue
+      prices[`${providerID}/${modelID}`.toLowerCase()] = price
+    }
+    return prices
+  } catch {
+    return {}
+  }
+}
+
+async function preparePrices(api, options = {}) {
+  const indexes = { byProviderModel: {}, byModel: {} }
+  for (const [key, price] of Object.entries(BUILT_IN_PRICES)) addPrice(indexes, key, price)
+  for (const [key, price] of Object.entries(await catalogPrices(api))) addPrice(indexes, key, price)
+  for (const [key, price] of Object.entries(options.prices ?? {})) addPrice(indexes, key, price)
+  return indexes
+}
+
 function modelKeyForMessage(message) {
   const info = messageInfo(message)
   const providerID = info?.providerID ?? info?.model?.providerID
@@ -92,6 +153,31 @@ function modelKeyForMessage(message) {
 
 function validPrice(price) {
   return typeof price?.input === "number" && Number.isFinite(price.input) && typeof price?.output === "number" && Number.isFinite(price.output)
+}
+
+function messageCostWithPrice(tokens, price) {
+  const breakdown = emptyBreakdown()
+  let cost = 0
+
+  for (const category of BREAKDOWN_CATEGORIES) {
+    const count = category.tokens(tokens)
+    const categoryCost = (count * category.price(price)) / TOKEN_PRICE_DENOMINATOR
+    breakdown[category.key].totalTokens = count
+    breakdown[category.key].cost = categoryCost
+    cost += categoryCost
+  }
+
+  return { available: true, cost, breakdown }
+}
+
+function priceCandidatesForMessage(message, prices) {
+  const key = modelKeyForMessage(message)
+  const direct = key ? prices.byProviderModel[key] : undefined
+  if (validPrice(direct)) return [direct]
+
+  const info = messageInfo(message)
+  const modelID = (info?.modelID ?? info?.model?.id)?.toLowerCase?.()
+  return modelID ? prices.byModel[modelID] ?? [] : []
 }
 
 function emptyBreakdown() {
@@ -114,14 +200,13 @@ function mergeBreakdown(target, source, isSubagent = false) {
   }
 }
 
-function costForMessage(message, options = {}) {
+function costForMessage(message, prices) {
   const tokens = messageInfo(message)?.tokens
   const breakdown = emptyBreakdown()
   if (contextTokensForMessage(message) <= 0) return { available: true, cost: 0, breakdown }
 
-  const key = modelKeyForMessage(message)
-  const price = key ? normalizedPrices(options)[key] : undefined
-  if (!validPrice(price)) {
+  const candidates = priceCandidatesForMessage(message, prices)
+  if (!candidates.length) {
     for (const category of BREAKDOWN_CATEGORIES) {
       const count = category.tokens(tokens)
       breakdown[category.key].totalTokens = count
@@ -130,20 +215,7 @@ function costForMessage(message, options = {}) {
     return { available: false, cost: 0, breakdown }
   }
 
-  let cost = 0
-  for (const category of BREAKDOWN_CATEGORIES) {
-    const count = category.tokens(tokens)
-    const categoryCost = (count * category.price(price)) / TOKEN_PRICE_DENOMINATOR
-    breakdown[category.key].totalTokens = count
-    breakdown[category.key].cost = categoryCost
-    cost += categoryCost
-  }
-
-  return {
-    available: true,
-    cost,
-    breakdown,
-  }
+  return candidates.map((price) => messageCostWithPrice(tokens, price)).sort((a, b) => b.cost - a.cost)[0]
 }
 
 export function collectDescendantIDs(sessions, rootID) {
@@ -246,7 +318,7 @@ async function readSessionMessages(api, sessionID, options) {
   return readData(output) ?? []
 }
 
-async function cumulativeUsageForSession(api, sessionID, options) {
+async function cumulativeUsageForSession(api, sessionID, options, prices) {
   const messages = await readSessionMessages(api, sessionID, options)
   let tokens = 0
   let cost = 0
@@ -255,7 +327,7 @@ async function cumulativeUsageForSession(api, sessionID, options) {
   for (let index = messages.length - 1; index >= 0; index--) {
     const messageTokens = contextTokensForMessage(messages[index])
     if (messageTokens <= 0) continue
-    const messageCost = costForMessage(messages[index], options)
+    const messageCost = costForMessage(messages[index], prices)
     tokens += messageTokens
     cost += messageCost.cost
     mergeBreakdown(breakdown, messageCost.breakdown)
@@ -266,6 +338,7 @@ async function cumulativeUsageForSession(api, sessionID, options) {
 
 export async function computeSidebarState(api, sessionID, options = {}) {
   try {
+    const prices = await preparePrices(api, options)
     const childTree = await collectDescendantsFromChildren(api, sessionID)
     const sessions = childTree ? [] : await listSessions(api, options)
     const descendants = childTree ?? collectDescendantIDs(sessions, sessionID)
@@ -278,7 +351,7 @@ export async function computeSidebarState(api, sessionID, options = {}) {
     const breakdown = emptyBreakdown()
 
     for (const id of allIDs) {
-      const usage = await cumulativeUsageForSession(api, id, options)
+      const usage = await cumulativeUsageForSession(api, id, options, prices)
       if (!usage.costAvailable) costAvailable = false
       cost += usage.cost
       if (id === sessionID) {
