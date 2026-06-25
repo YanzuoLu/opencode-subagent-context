@@ -9,12 +9,12 @@ OpenCode 1.17.8 loads TUI plugins from `tui.json`. Add this one-line plugin entr
 ```json
 {
   "plugin": [
-    "opencode-subagent-context@git+https://github.com/YanzuoLu/opencode-subagent-context.git#v0.1.8"
+    "opencode-subagent-context@git+https://github.com/YanzuoLu/opencode-subagent-context.git#v0.1.9"
   ]
 }
 ```
 
-Use a tagged release like `v0.1.8`. Do not leave this plugin on a floating branch spec; OpenCode caches plugin installs.
+Use a tagged release like `v0.1.9`. Do not leave this plugin on a floating branch spec; OpenCode caches plugin installs.
 
 No manual `npm install` step is required. OpenCode installs the GitHub plugin spec at startup.
 
@@ -46,7 +46,13 @@ Token counts below 1,000 remain unabridged. Longer counts use one decimal place 
 
 Auto compaction should not make this plugin's token total go down. If OpenCode records compaction or summary generation as assistant messages with token usage, those messages are included in the cumulative total and cumulative spend.
 
-The plugin first tries OpenCode model catalog prices, then its built-in OpenAI fallback prices. User-configured `prices` in `tui.json` override both.
+The plugin reports API-equivalent cost, so curated prices win over whatever a provider is currently configured to charge. Prices are resolved with this precedence, highest first:
+
+1. User-configured `prices` in `tui.json`.
+2. Built-in curated OpenAI prices.
+3. OpenCode model catalog prices, read live from the running server's `config.providers` API.
+
+The catalog only fills in models the curated tables do not cover. This matters when a provider is on a subscription or coding plan: the live catalog may report that model at `$0`, but a `$0` catalog price never clobbers a real built-in or user-configured API-equivalent price. The catalog is what lets non-OpenAI models (for example `deepseek/deepseek-v4-pro`) be priced without manual configuration.
 
 Price matching first uses exact `providerID/modelID`. If that is unavailable, the plugin tries an exact `modelID` match across the loaded price table and uses the highest calculated cost when multiple providers expose the same model ID. It does not fuzzy-match model names.
 

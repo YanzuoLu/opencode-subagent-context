@@ -74,14 +74,6 @@ export function contextTokensForMessage(message) {
   )
 }
 
-function normalizedPrices(options = {}) {
-  const prices = { ...BUILT_IN_PRICES }
-  for (const [key, value] of Object.entries(options.prices ?? {})) {
-    prices[key.toLowerCase()] = value
-  }
-  return prices
-}
-
 function addPrice(indexes, key, price) {
   const normalizedKey = typeof key === "string" ? key.toLowerCase() : undefined
   if (!normalizedKey || !validPrice(price)) return
@@ -112,33 +104,57 @@ function priceFromCatalogModel(model) {
   }
 }
 
-async function catalogPrices(api) {
-  const list = api.client?.v2?.model?.list
-  if (typeof list !== "function") return {}
+function pricesFromCatalogModels(models, fallbackProviderID) {
+  const prices = {}
+  const list = Array.isArray(models) ? models : models && typeof models === "object" ? Object.values(models) : []
+  for (const model of list) {
+    const providerID = model?.providerID ?? fallbackProviderID
+    const modelID = model?.id
+    const price = priceFromCatalogModel(model)
+    if (!providerID || !modelID || !validPrice(price)) continue
+    prices[`${providerID}/${modelID}`.toLowerCase()] = price
+  }
+  return prices
+}
+
+async function providerConfigPrices(api) {
+  // Call as a method so the SDK resource keeps its `this`; a detached reference loses `this.client`.
+  const config = api.client?.config
+  if (typeof config?.providers !== "function") return {}
 
   try {
-    const output = await list({ location: pathOptions(api) })
-    const models = readData(output)
-    if (!Array.isArray(models)) return {}
-
+    const data = readData(await config.providers(pathOptions(api)))
+    const list = Array.isArray(data?.providers) ? data.providers : Array.isArray(data) ? data : []
     const prices = {}
-    for (const model of models) {
-      const providerID = model?.providerID
-      const modelID = model?.id
-      const price = priceFromCatalogModel(model)
-      if (!providerID || !modelID || !validPrice(price)) continue
-      prices[`${providerID}/${modelID}`.toLowerCase()] = price
-    }
+    for (const provider of list) Object.assign(prices, pricesFromCatalogModels(provider?.models, provider?.id))
     return prices
   } catch {
     return {}
   }
 }
 
+async function modelListPrices(api) {
+  const model = api.client?.v2?.model
+  if (typeof model?.list !== "function") return {}
+
+  try {
+    return pricesFromCatalogModels(readData(await model.list({ location: pathOptions(api) })))
+  } catch {
+    return {}
+  }
+}
+
+async function catalogPrices(api) {
+  return { ...(await modelListPrices(api)), ...(await providerConfigPrices(api)) }
+}
+
 async function preparePrices(api, options = {}) {
   const indexes = { byProviderModel: {}, byModel: {} }
-  for (const [key, price] of Object.entries(BUILT_IN_PRICES)) addPrice(indexes, key, price)
+  // Lowest precedence first so later writes win: live catalog < curated built-ins < user-configured prices.
+  // A model the provider catalog reports at $0 (subscription/coding-plan) must not clobber a real
+  // API-equivalent built-in or user price, so catalog is applied before, not after, the curated tables.
   for (const [key, price] of Object.entries(await catalogPrices(api))) addPrice(indexes, key, price)
+  for (const [key, price] of Object.entries(BUILT_IN_PRICES)) addPrice(indexes, key, price)
   for (const [key, price] of Object.entries(options.prices ?? {})) addPrice(indexes, key, price)
   return indexes
 }

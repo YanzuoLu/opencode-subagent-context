@@ -70,6 +70,25 @@ function makeApiWithModels({ sessions, messages, models, modelError }) {
   return api
 }
 
+function providerModel(id, providerID, input, output, read = 0, write = 0) {
+  return { id, providerID, cost: { input, output, cache: { read, write } } }
+}
+
+function makeApiWithProviders({ sessions, messages, providers, providersError }) {
+  const api = makeApi({ sessions, messages })
+  // `_providers`/`_error` are read through `this` so a detached method call (lost `this`) fails the test.
+  api.client.config = {
+    _providers: providers,
+    _error: providersError,
+    async providers(input = {}) {
+      api.calls.push({ method: "config.providers", input })
+      if (this._error) throw this._error
+      return { data: { providers: this._providers, default: {} } }
+    },
+  }
+  return api
+}
+
 function makePaginatedApi({ sessions, messages }) {
   const calls = []
   return {
@@ -449,6 +468,64 @@ test("computeSidebarState falls back to configured and built-in prices when cata
   assert.equal(state.ok, true)
   assert.equal(state.costAvailable, true)
   assert.equal(state.cost, 3)
+})
+
+test("computeSidebarState prices models from the config.providers catalog", async () => {
+  const api = makeApiWithProviders({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000), "deepseek", "deepseek-v4-pro")],
+    },
+    providers: [
+      { id: "deepseek", models: { "deepseek-v4-pro": providerModel("deepseek-v4-pro", "deepseek", 0.435, 0.87) } },
+    ],
+  })
+
+  const state = await computeSidebarState(api, "root")
+  assert.equal(state.costAvailable, true)
+  assert.equal(state.cost, (1_000_000 * 0.435 + 1_000_000 * 0.87) / 1_000_000)
+})
+
+test("computeSidebarState keeps API-equivalent built-in price over a $0 catalog price", async () => {
+  const api = makeApiWithProviders({
+    sessions: [{ id: "root", cost: 999 }],
+    messages: {
+      root: [assistant(tokens(1_000_000, 1_000_000), "openai", "gpt-5.5")],
+    },
+    // Subscription/coding-plan provider reports gpt-5.5 at $0; it must not clobber the curated built-in.
+    providers: [{ id: "openai", models: { "gpt-5.5": providerModel("gpt-5.5", "openai", 0, 0) } }],
+  })
+
+  const state = await computeSidebarState(api, "root")
+  assert.equal(state.costAvailable, true)
+  // Built-in gpt-5.5 is input $5 / output $30 per 1M tokens.
+  assert.equal(state.cost, (1_000_000 * 5 + 1_000_000 * 30) / 1_000_000)
+})
+
+test("computeSidebarState sums a mixed-model session: built-in main + catalog subagent", async () => {
+  const api = makeApiWithProviders({
+    sessions: [
+      { id: "root", cost: 999 },
+      { id: "child", parentID: "root", cost: 999 },
+    ],
+    messages: {
+      // Main uses gpt-5.5 priced at $0 by the live provider -> falls back to built-in $5/$30.
+      root: [assistant(tokens(1_000_000, 1_000_000), "openai", "gpt-5.5")],
+      // Subagent uses deepseek, priced only by the catalog.
+      child: [assistant(tokens(1_000_000, 1_000_000), "deepseek", "deepseek-v4-pro")],
+    },
+    providers: [
+      { id: "openai", models: { "gpt-5.5": providerModel("gpt-5.5", "openai", 0, 0) } },
+      { id: "deepseek", models: { "deepseek-v4-pro": providerModel("deepseek-v4-pro", "deepseek", 0.435, 0.87) } },
+    ],
+  })
+
+  const state = await computeSidebarState(api, "root")
+  assert.equal(state.costAvailable, true)
+  assert.equal(state.subagentCount, 1)
+  const gpt = (1_000_000 * 5 + 1_000_000 * 30) / 1_000_000
+  const deepseek = (1_000_000 * 0.435 + 1_000_000 * 0.87) / 1_000_000
+  assert.equal(state.cost, gpt + deepseek)
 })
 
 test("computeSidebarState reports per-category total and subagent usage with costs", async () => {
